@@ -3,25 +3,27 @@
 import { useState, useEffect } from "react";
 import { Facet, Concept, Topic, Question, MatchingQuestion } from "../types/api";
 
-const KNOWLEDGE_API_URL = "http://localhost:8080"; 
-const QUESTIONS_API_URL = "http://localhost:8081";
+const KNOWLEDGE_API_URL = "http://localhost:8081"; 
+const QUESTIONS_API_URL = "http://localhost:8080";
 
 export default function Home() {
   const [facets, setFacets] = useState<Facet[]>([]);
   const [selectedConcepts, setSelectedConcepts] = useState<Record<string, string[]>>({});
-  const [topics, setTopics] = useState<Topic[]>([]); // Новый стейт для топиков
-  const [questions, setQuestions] = useState<Question[]>([]);
+  const [topics, setTopics] = useState<Topic[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   
-  // Добавили состояние "topics"
-  const [quizState, setQuizState] = useState<"idle" | "topics" | "playing" | "results">("idle");
+  const [quizState, setQuizState] = useState<"idle" | "topics" | "setup" | "playing" | "results">("idle");
+  const [selectedTopic, setSelectedTopic] = useState<Topic | null>(null);
+  
+  const [availableQuestions, setAvailableQuestions] = useState<Question[]>([]);
+  const [questionCount, setQuestionCount] = useState(10);
+  
+  const [questions, setQuestions] = useState<Question[]>([]);
   const [currentQIndex, setCurrentQIndex] = useState(0);
   const [score, setScore] = useState(0);
   
-  // MCQ state
   const [selectedAnswer, setSelectedAnswer] = useState<string | null>(null);
   
-  // Matching state
   const [shuffledMatchingValues, setShuffledMatchingValues] = useState<string[]>([]);
   const [matchingAnswers, setMatchingAnswers] = useState<Record<string, string>>({});
   const [isMatchingSubmitted, setIsMatchingSubmitted] = useState(false);
@@ -41,7 +43,6 @@ export default function Home() {
     fetchFacets();
   }, []);
 
-  // Подготовка данных для Matching при смене вопроса
   useEffect(() => {
     const currentQ = questions[currentQIndex];
     if (quizState === "playing" && currentQ?.q_type === "MATCHING") {
@@ -55,7 +56,27 @@ export default function Home() {
     }
   }, [currentQIndex, questions, quizState]);
 
-  // ПРАВКА 3: Вспомогательная рекурсивная функция для получения ID всех потомков
+  // ХЕЛПЕР: Умное форматирование дат в тексте
+  const formatDateInText = (text: string | undefined | null) => {
+    if (!text) return "";
+    // Ищем ISO даты вида YYYY-MM-DD или YYYY-MM-DDTHH:mm:ssZ
+    const regex = /\b\d{4}-\d{2}-\d{2}(?:T[A-Za-z0-9:.-]+)?\b/g;
+    return text.replace(regex, (match) => {
+      try {
+        const date = new Date(match);
+        if (isNaN(date.getTime())) return match;
+        // Превращаем в человеческий вид (например, "19 августа 1787 г.")
+        return date.toLocaleDateString("ru-RU", {
+          year: "numeric",
+          month: "long",
+          day: "numeric"
+        });
+      } catch {
+        return match;
+      }
+    });
+  };
+
   const getAllConceptIds = (concept: Concept): string[] => {
     let ids = [concept.id];
     if (concept.children) {
@@ -66,7 +87,6 @@ export default function Home() {
     return ids;
   };
 
-  // ПРАВКА 3: Каскадное выделение (родитель + дети)
   const handleToggleConcept = (schemeId: string, concept: Concept) => {
     const idsToToggle = getAllConceptIds(concept);
 
@@ -75,13 +95,11 @@ export default function Home() {
       const isCurrentlySelected = schemeConcepts.includes(concept.id);
 
       if (isCurrentlySelected) {
-        // Убираем родителя и всех его детей
         return { 
           ...prev, 
           [schemeId]: schemeConcepts.filter((id) => !idsToToggle.includes(id)) 
         };
       } else {
-        // Добавляем родителя и всех его детей
         return { 
           ...prev, 
           [schemeId]: Array.from(new Set([...schemeConcepts, ...idsToToggle])) 
@@ -90,7 +108,6 @@ export default function Home() {
     });
   };
 
-  // ПРАВКА 1: Только получаем топики, квиз не запускаем
   const handleApplyFilters = async () => {
     setIsLoading(true);
     try {
@@ -108,7 +125,7 @@ export default function Home() {
         setQuizState("idle");
       } else {
         setTopics(topicsData.topics);
-        setQuizState("topics"); // Переходим на экран выбора топика
+        setQuizState("topics");
       }
     } catch (error) {
       console.error(error);
@@ -117,7 +134,6 @@ export default function Home() {
     setIsLoading(false);
   };
 
-  // ПРАВКА 2: Запрашиваем вопросы по топику. Генерация убрана.
   const handleSelectTopic = async (topic: Topic) => {
     setIsLoading(true);
     try {
@@ -128,8 +144,10 @@ export default function Home() {
       if (!data || data.length === 0) {
         alert(`Вопросы для темы "${topic.name}" еще не готовы. Попробуйте другую тему.`);
       } else {
-        setQuestions(data.sort(() => 0.5 - Math.random()));
-        startQuiz();
+        setAvailableQuestions(data);
+        setSelectedTopic(topic);
+        setQuestionCount(Math.min(5, data.length));
+        setQuizState("setup");
       }
     } catch (error) {
       console.error(error);
@@ -140,16 +158,21 @@ export default function Home() {
   };
 
   const startQuiz = () => {
+    const shuffled = [...availableQuestions].sort(() => 0.5 - Math.random());
+    setQuestions(shuffled.slice(0, questionCount));
+    
     setQuizState("playing");
     setCurrentQIndex(0);
     setScore(0);
     setSelectedAnswer(null);
+    setIsMatchingSubmitted(false);
   };
 
   const nextQuestion = () => {
     if (currentQIndex + 1 < questions.length) {
       setCurrentQIndex((i) => i + 1);
       setSelectedAnswer(null);
+      setIsMatchingSubmitted(false); 
     } else {
       setQuizState("results");
     }
@@ -163,7 +186,7 @@ export default function Home() {
     if (q.q_type === "MCQ" && key === q.payload.correct_key) {
       setScore((s) => s + 1);
     }
-    setTimeout(nextQuestion, 1500);
+    // Больше никаких setTimeout, ждем клика от юзера!
   };
 
   const handleCheckMatching = () => {
@@ -178,7 +201,7 @@ export default function Home() {
     });
 
     if (isAllCorrect) setScore((s) => s + 1);
-    setTimeout(nextQuestion, 2500);
+    // Больше никаких setTimeout, ждем клика от юзера!
   };
 
   const ConceptNode = ({ concept, schemeId, level = 0 }: { concept: Concept, schemeId: string, level?: number }) => {
@@ -189,7 +212,7 @@ export default function Home() {
           <input
             type="checkbox"
             checked={isSelected}
-            onChange={() => handleToggleConcept(schemeId, concept)} // Передаем весь объект concept
+            onChange={() => handleToggleConcept(schemeId, concept)}
             className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4 h-4"
           />
           <span className={`text-sm ${level === 0 ? 'font-medium text-gray-800' : 'text-gray-600'}`}>{concept.label}</span>
@@ -213,7 +236,18 @@ export default function Home() {
           <span className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full font-bold">Счет: {score}</span>
         </div>
         
-        <h2 className="text-2xl font-bold mb-8 text-gray-800 leading-snug">{q.stem}</h2>
+        {/* Пропускаем stem через форматтер дат */}
+        <h2 className="text-2xl font-bold mb-6 text-gray-800 leading-snug">{formatDateInText(q.stem)}</h2>
+
+        {q.q_type === "MCQ" && q.payload.image_url && (
+          <div className="mb-8 flex justify-center">
+            <img 
+              src={q.payload.image_url} 
+              alt="Иллюстрация к вопросу" 
+              className="max-w-full h-auto max-h-72 rounded-xl shadow-sm border border-gray-200 object-contain"
+            />
+          </div>
+        )}
 
         {q.q_type === "MATCHING" && (
           <div className="space-y-4">
@@ -224,7 +258,8 @@ export default function Home() {
               
               return (
                 <div key={pair.left} className={`flex flex-col md:flex-row md:items-center justify-between p-4 rounded-xl border ${isCorrect ? 'bg-green-50 border-green-300' : isWrong ? 'bg-red-50 border-red-300' : 'bg-gray-50 border-gray-200'}`}>
-                  <span className="font-medium text-gray-800 mb-2 md:mb-0 w-1/2 pr-4">{pair.left}</span>
+                  {/* Форматируем левую часть */}
+                  <span className="font-medium text-gray-800 mb-2 md:mb-0 w-1/2 pr-4">{formatDateInText(pair.left)}</span>
                   <select
                     disabled={isMatchingSubmitted}
                     value={matchingAnswers[pair.left] || ""}
@@ -233,19 +268,23 @@ export default function Home() {
                   >
                     <option value="" disabled>Выберите пару...</option>
                     {shuffledMatchingValues.map((val, idx) => (
-                      <option key={idx} value={val}>{val}</option>
+                      <option key={idx} value={val}>{formatDateInText(val)}</option>
                     ))}
                   </select>
                 </div>
               );
             })}
-            <button
-              onClick={handleCheckMatching}
-              disabled={isMatchingSubmitted || Object.keys(matchingAnswers).length !== q.payload.pairs.length}
-              className="mt-6 w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-md"
-            >
-              {isMatchingSubmitted ? "Проверка..." : "Ответить"}
-            </button>
+            
+            {/* Скрываем кнопку 'Ответить', если уже ответили */}
+            {!isMatchingSubmitted && (
+              <button
+                onClick={handleCheckMatching}
+                disabled={Object.keys(matchingAnswers).length !== q.payload.pairs.length}
+                className="mt-6 w-full bg-blue-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-md"
+              >
+                Ответить
+              </button>
+            )}
           </div>
         )}
 
@@ -264,17 +303,31 @@ export default function Home() {
               return (
                 <button key={key} onClick={() => handleMCQAnswer(key)} disabled={!!selectedAnswer} className={btnClass}>
                   <span className="inline-block w-8 text-center font-bold mr-2 text-gray-400">{key}</span> 
-                  {text}
+                  {/* Форматируем ответ */}
+                  {formatDateInText(text)}
                 </button>
               );
             })}
           </div>
         )}
 
+        {/* Блок с пояснением */}
         {(selectedAnswer || isMatchingSubmitted) && q.justification && (
           <div className="mt-8 p-5 bg-blue-50 border border-blue-100 rounded-xl text-blue-900 text-sm leading-relaxed animate-in fade-in zoom-in-95">
             <strong className="block mb-1 text-blue-700">Объяснение:</strong> 
-            {q.justification}
+            {formatDateInText(q.justification)}
+          </div>
+        )}
+
+        {/* НОВАЯ КНОПКА: Переход к следующему вопросу */}
+        {(selectedAnswer || isMatchingSubmitted) && (
+          <div className="mt-8 pt-6 border-t border-gray-100 flex justify-end animate-in fade-in">
+            <button
+              onClick={nextQuestion}
+              className="bg-gray-900 text-white font-bold py-3 px-8 rounded-xl hover:bg-gray-800 transition-colors shadow-md"
+            >
+              {currentQIndex + 1 < questions.length ? "Следующий вопрос ➔" : "Завершить квиз 🎉"}
+            </button>
           </div>
         )}
       </div>
@@ -314,11 +367,10 @@ export default function Home() {
           </div>
         )}
 
-        {/* ПРАВКА 1: Экран выбора топика */}
         {quizState === "topics" && (
           <div className="w-full max-w-4xl animate-in fade-in zoom-in-95">
             <h2 className="text-3xl font-extrabold text-gray-900 mb-2">Выберите тему</h2>
-            <p className="text-gray-500 mb-8">Найдено тем: {topics.length}. Нажмите на любую, чтобы начать квиз.</p>
+            <p className="text-gray-500 mb-8">Найдено тем: {topics.length}. Нажмите на любую, чтобы настроить квиз.</p>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {topics.map(topic => (
@@ -338,6 +390,42 @@ export default function Home() {
           </div>
         )}
 
+        {quizState === "setup" && selectedTopic && (
+          <div className="w-full max-w-lg bg-white p-10 rounded-2xl shadow-lg border border-gray-100 animate-in fade-in zoom-in-95">
+            <h2 className="text-3xl font-extrabold text-gray-900 mb-2">Настройка квиза</h2>
+            <h3 className="text-xl font-medium text-blue-600 mb-8">{selectedTopic.name}</h3>
+
+            <div className="mb-8">
+              <label className="block text-gray-700 font-bold mb-4 text-lg">
+                Количество вопросов: <span className="text-blue-600 text-2xl ml-2">{questionCount}</span> <span className="text-gray-400 text-sm font-normal">из {availableQuestions.length}</span>
+              </label>
+              
+              <input 
+                type="range" 
+                min={1} 
+                max={availableQuestions.length} 
+                value={questionCount} 
+                onChange={(e) => setQuestionCount(Number(e.target.value))}
+                className="w-full h-3 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+              />
+              
+              <div className="flex justify-between text-xs text-gray-400 mt-2 font-medium">
+                <span>1</span>
+                <span>{availableQuestions.length}</span>
+              </div>
+            </div>
+
+            <div className="flex gap-4 mt-10">
+               <button onClick={() => setQuizState("topics")} className="w-1/3 bg-gray-100 text-gray-700 font-bold py-3 px-4 rounded-xl hover:bg-gray-200 transition-colors">
+                 Назад
+               </button>
+               <button onClick={startQuiz} className="w-2/3 bg-blue-600 text-white font-bold py-3 px-4 rounded-xl hover:bg-blue-700 transition-colors shadow-md">
+                 Начать квиз
+               </button>
+            </div>
+          </div>
+        )}
+
         {quizState === "playing" && questions.length > 0 && renderQuestion()}
 
         {quizState === "results" && (
@@ -345,6 +433,9 @@ export default function Home() {
             <div className="text-6xl mb-6">🎉</div>
             <h2 className="text-3xl font-extrabold mb-4 text-gray-900">Квиз завершен!</h2>
             <p className="text-xl text-gray-600 mb-8">Ваш результат: <span className="font-bold text-blue-600">{score}</span> из {questions.length}</p>
+            <button onClick={() => { setQuizState("setup"); }} className="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-blue-700 transition-colors shadow-md mb-3">
+              Пройти снова
+            </button>
             <button onClick={() => { setQuizState("topics"); }} className="w-full bg-gray-900 text-white font-bold py-3 px-6 rounded-xl hover:bg-gray-800 transition-colors shadow-md mb-3">
               Вернуться к темам
             </button>
