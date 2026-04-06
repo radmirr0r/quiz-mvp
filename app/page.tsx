@@ -9,10 +9,12 @@ const QUESTIONS_API_URL = "http://localhost:8081";
 export default function Home() {
   const [facets, setFacets] = useState<Facet[]>([]);
   const [selectedConcepts, setSelectedConcepts] = useState<Record<string, string[]>>({});
+  const [topics, setTopics] = useState<Topic[]>([]); // Новый стейт для топиков
   const [questions, setQuestions] = useState<Question[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   
-  const [quizState, setQuizState] = useState<"idle" | "playing" | "results">("idle");
+  // Добавили состояние "topics"
+  const [quizState, setQuizState] = useState<"idle" | "topics" | "playing" | "results">("idle");
   const [currentQIndex, setCurrentQIndex] = useState(0);
   const [score, setScore] = useState(0);
   
@@ -43,31 +45,52 @@ export default function Home() {
   useEffect(() => {
     const currentQ = questions[currentQIndex];
     if (quizState === "playing" && currentQ?.q_type === "MATCHING") {
-      // Собираем все правильные правые части
       const rightValues = currentQ.payload.pairs.map(p => p.right);
-      // Добавляем дистракторы (фейковые ответы для усложнения)
       const distractors = currentQ.payload.distractors || [];
-      
-      // Объединяем и перемешиваем
       const combined = [...rightValues, ...distractors];
-      setShuffledMatchingValues(combined.sort(() => 0.5 - Math.random()));
       
+      setShuffledMatchingValues(combined.sort(() => 0.5 - Math.random()));
       setMatchingAnswers({});
       setIsMatchingSubmitted(false);
     }
   }, [currentQIndex, questions, quizState]);
 
-  const handleToggleConcept = (schemeId: string, conceptId: string) => {
+  // ПРАВКА 3: Вспомогательная рекурсивная функция для получения ID всех потомков
+  const getAllConceptIds = (concept: Concept): string[] => {
+    let ids = [concept.id];
+    if (concept.children) {
+      concept.children.forEach(child => {
+        ids = [...ids, ...getAllConceptIds(child)];
+      });
+    }
+    return ids;
+  };
+
+  // ПРАВКА 3: Каскадное выделение (родитель + дети)
+  const handleToggleConcept = (schemeId: string, concept: Concept) => {
+    const idsToToggle = getAllConceptIds(concept);
+
     setSelectedConcepts((prev) => {
       const schemeConcepts = prev[schemeId] || [];
-      if (schemeConcepts.includes(conceptId)) {
-        return { ...prev, [schemeId]: schemeConcepts.filter((c) => c !== conceptId) };
+      const isCurrentlySelected = schemeConcepts.includes(concept.id);
+
+      if (isCurrentlySelected) {
+        // Убираем родителя и всех его детей
+        return { 
+          ...prev, 
+          [schemeId]: schemeConcepts.filter((id) => !idsToToggle.includes(id)) 
+        };
       } else {
-        return { ...prev, [schemeId]: [...schemeConcepts, conceptId] };
+        // Добавляем родителя и всех его детей
+        return { 
+          ...prev, 
+          [schemeId]: Array.from(new Set([...schemeConcepts, ...idsToToggle])) 
+        };
       }
     });
   };
 
+  // ПРАВКА 1: Только получаем топики, квиз не запускаем
   const handleApplyFilters = async () => {
     setIsLoading(true);
     try {
@@ -82,36 +105,38 @@ export default function Home() {
       
       if (!topicsData.topics || topicsData.topics.length === 0) {
         alert("По этим фильтрам топики не найдены.");
-        setIsLoading(false);
-        return;
-      }
-
-      const questionPromises = topicsData.topics.map((t) =>
-        fetch(`${QUESTIONS_API_URL}/api/v1/questions?topic_slug=${t.slug}&quantity=0`)
-          .then((res) => res.json())
-      );
-
-      const nestedQuestions: Question[][] = await Promise.all(questionPromises);
-      const allQuestions = nestedQuestions.flat().filter(Boolean);
-
-      if (allQuestions.length === 0) {
-        for (const t of topicsData.topics) {
-          await fetch(`${QUESTIONS_API_URL}/api/v1/generate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ topic_slug: t.slug })
-          });
-        }
-        alert("Вопросы генерируются в фоне. Попробуй еще раз через 30 секунд.");
+        setQuizState("idle");
       } else {
-        setQuestions(allQuestions.sort(() => 0.5 - Math.random()));
-        startQuiz();
+        setTopics(topicsData.topics);
+        setQuizState("topics"); // Переходим на экран выбора топика
       }
     } catch (error) {
       console.error(error);
       alert("Не удалось связаться с бэкендом.");
     }
     setIsLoading(false);
+  };
+
+  // ПРАВКА 2: Запрашиваем вопросы по топику. Генерация убрана.
+  const handleSelectTopic = async (topic: Topic) => {
+    setIsLoading(true);
+    try {
+      const res = await fetch(`${QUESTIONS_API_URL}/api/v1/questions?topic_slug=${topic.slug}&quantity=0`);
+      if (!res.ok) throw new Error("Ошибка загрузки вопросов");
+      const data: Question[] = await res.json();
+
+      if (!data || data.length === 0) {
+        alert(`Вопросы для темы "${topic.name}" еще не готовы. Попробуйте другую тему.`);
+      } else {
+        setQuestions(data.sort(() => 0.5 - Math.random()));
+        startQuiz();
+      }
+    } catch (error) {
+      console.error(error);
+      alert("Не удалось загрузить вопросы для этого топика.");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const startQuiz = () => {
@@ -130,7 +155,6 @@ export default function Home() {
     }
   };
 
-  // Обработчик MCQ
   const handleMCQAnswer = (key: string) => {
     if (selectedAnswer) return;
     setSelectedAnswer(key);
@@ -142,13 +166,11 @@ export default function Home() {
     setTimeout(nextQuestion, 1500);
   };
 
-  // Обработчик Matching
   const handleCheckMatching = () => {
     setIsMatchingSubmitted(true);
     const q = questions[currentQIndex] as MatchingQuestion;
     let isAllCorrect = true;
     
-    // Сверяем ответы пользователя с оригинальными парами
     q.payload.pairs.forEach(pair => {
       if (matchingAnswers[pair.left] !== pair.right) {
         isAllCorrect = false;
@@ -167,7 +189,7 @@ export default function Home() {
           <input
             type="checkbox"
             checked={isSelected}
-            onChange={() => handleToggleConcept(schemeId, concept.id)}
+            onChange={() => handleToggleConcept(schemeId, concept)} // Передаем весь объект concept
             className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4 h-4"
           />
           <span className={`text-sm ${level === 0 ? 'font-medium text-gray-800' : 'text-gray-600'}`}>{concept.label}</span>
@@ -185,7 +207,7 @@ export default function Home() {
     const q = questions[currentQIndex];
 
     return (
-      <div className="w-full max-w-2xl bg-white p-8 rounded-2xl shadow-lg border border-gray-100">
+      <div className="w-full max-w-2xl bg-white p-8 rounded-2xl shadow-lg border border-gray-100 animate-in fade-in zoom-in-95">
         <div className="mb-6 flex justify-between items-center text-sm font-medium text-gray-500">
           <span className="uppercase tracking-wide font-bold">{q.q_type} • Вопрос {currentQIndex + 1} из {questions.length}</span>
           <span className="bg-blue-50 text-blue-700 px-3 py-1 rounded-full font-bold">Счет: {score}</span>
@@ -279,7 +301,7 @@ export default function Home() {
         )}
         <div className="mt-8 pt-4 border-t border-gray-100 sticky bottom-0 bg-white">
           <button onClick={handleApplyFilters} disabled={isLoading || facets.length === 0} className="w-full bg-blue-600 text-white font-semibold py-3 px-4 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-md">
-            {isLoading ? "Загрузка..." : "Применить и начать"}
+            {isLoading ? "Загрузка..." : "Применить фильтры"}
           </button>
         </div>
       </aside>
@@ -288,17 +310,46 @@ export default function Home() {
         {quizState === "idle" && (
           <div className="text-center max-w-lg">
             <h1 className="text-4xl font-extrabold text-gray-900 mb-4">Добро пожаловать</h1>
-            <p className="text-lg text-gray-500">Выберите категории слева и начните квиз.</p>
+            <p className="text-lg text-gray-500">Выберите категории слева и нажмите "Применить фильтры", чтобы найти доступные темы.</p>
           </div>
         )}
+
+        {/* ПРАВКА 1: Экран выбора топика */}
+        {quizState === "topics" && (
+          <div className="w-full max-w-4xl animate-in fade-in zoom-in-95">
+            <h2 className="text-3xl font-extrabold text-gray-900 mb-2">Выберите тему</h2>
+            <p className="text-gray-500 mb-8">Найдено тем: {topics.length}. Нажмите на любую, чтобы начать квиз.</p>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {topics.map(topic => (
+                <button 
+                  key={topic.slug} 
+                  onClick={() => handleSelectTopic(topic)}
+                  disabled={isLoading}
+                  className="text-left p-6 bg-white border border-gray-200 rounded-xl shadow-sm hover:shadow-md hover:border-blue-400 hover:bg-blue-50 transition-all group disabled:opacity-50"
+                >
+                  <h3 className="text-xl font-bold text-gray-800 group-hover:text-blue-700 mb-2">{topic.name}</h3>
+                  {topic.description && (
+                     <p className="text-sm text-gray-600 line-clamp-2">{topic.description}</p>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {quizState === "playing" && questions.length > 0 && renderQuestion()}
+
         {quizState === "results" && (
-          <div className="w-full max-w-md bg-white p-10 rounded-2xl shadow-lg text-center border border-gray-100">
+          <div className="w-full max-w-md bg-white p-10 rounded-2xl shadow-lg text-center border border-gray-100 animate-in zoom-in-95">
             <div className="text-6xl mb-6">🎉</div>
             <h2 className="text-3xl font-extrabold mb-4 text-gray-900">Квиз завершен!</h2>
             <p className="text-xl text-gray-600 mb-8">Ваш результат: <span className="font-bold text-blue-600">{score}</span> из {questions.length}</p>
-            <button onClick={() => { setQuizState("idle"); setSelectedConcepts({}); }} className="w-full bg-gray-900 text-white font-bold py-3 px-6 rounded-xl hover:bg-gray-800 transition-colors shadow-md">
-              Собрать новый квиз
+            <button onClick={() => { setQuizState("topics"); }} className="w-full bg-gray-900 text-white font-bold py-3 px-6 rounded-xl hover:bg-gray-800 transition-colors shadow-md mb-3">
+              Вернуться к темам
+            </button>
+            <button onClick={() => { setQuizState("idle"); setSelectedConcepts({}); setTopics([]); }} className="w-full bg-gray-100 text-gray-700 font-bold py-3 px-6 rounded-xl hover:bg-gray-200 transition-colors">
+              Сбросить фильтры
             </button>
           </div>
         )}
